@@ -103,7 +103,7 @@ export const caMessages: MessageCatalog = {
   'quiz.legendPending': 'Pendent',
   'quiz.viewQuestionAria': 'Veure pregunta {{number}}',
 
-  'status.completedButton': '🎉 Completat!',
+  'status.completedButton': 'Completat!',
   'status.failedQuestionTitle': 'Pregunta {{number}} - Fallada',
   'status.correctBadge': '✓ Correcta',
   'status.yourAnswerBadge': '✗ La teva resposta',

@@ -102,7 +102,7 @@ export const enMessages: MessageCatalog = {
   'quiz.legendPending': 'Pending',
   'quiz.viewQuestionAria': 'View question {{number}}',
 
-  'status.completedButton': '🎉 Completed!',
+  'status.completedButton': 'Completed!',
   'status.failedQuestionTitle': 'Question {{number}} - Failed',
   'status.correctBadge': '✓ Correct',
   'status.yourAnswerBadge': '✗ Your answer',

@@ -98,7 +98,7 @@ export const esMessages = {
   'quiz.legendPending': 'Pendiente',
   'quiz.viewQuestionAria': 'Ver pregunta {{number}}',
 
-  'status.completedButton': '🎉 ¡Completado!',
+  'status.completedButton': '¡Completado!',
   'status.failedQuestionTitle': 'Pregunta {{number}} - Fallada',
   'status.correctBadge': '✓ Correcta',
   'status.yourAnswerBadge': '✗ Tu respuesta',

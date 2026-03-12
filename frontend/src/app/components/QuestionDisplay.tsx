@@ -108,16 +108,18 @@ export function QuestionDisplay({
           <button
             className="px-6 py-2 bg-green-600 text-white rounded text-lg"
             data-testid="tf-answer-true"
+            aria-label={t('status.trueLabel')}
             onClick={() => handleAnswer('V')}
           >
-            V
+            {t('quiz.tfTrueButton')}
           </button>
           <button
             className="px-6 py-2 bg-red-600 text-white rounded text-lg"
             data-testid="tf-answer-false"
+            aria-label={t('status.falseLabel')}
             onClick={() => handleAnswer('F')}
           >
-            F
+            {t('quiz.tfFalseButton')}
           </button>
         </div>
       ) : (

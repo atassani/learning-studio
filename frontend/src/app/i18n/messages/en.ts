@@ -109,6 +109,8 @@ export const enMessages: MessageCatalog = {
   'status.explanation': 'Explanation:',
   'status.trueLabel': 'True',
   'status.falseLabel': 'False',
+  'quiz.tfTrueButton': 'T',
+  'quiz.tfFalseButton': 'F',
   'status.questionTooltip': 'View question details {{number}}',
 
   'areas.errorTitle': 'Error loading areas',

@@ -105,6 +105,8 @@ export const esMessages = {
   'status.explanation': 'Explicación:',
   'status.trueLabel': 'Verdadero',
   'status.falseLabel': 'Falso',
+  'quiz.tfTrueButton': 'V',
+  'quiz.tfFalseButton': 'F',
   'status.questionTooltip': 'Ver detalles de la pregunta {{number}}',
 
   'areas.errorTitle': 'Error al cargar las áreas',

@@ -110,6 +110,8 @@ export const caMessages: MessageCatalog = {
   'status.explanation': 'Explicació:',
   'status.trueLabel': 'Vertader',
   'status.falseLabel': 'Fals',
+  'quiz.tfTrueButton': 'V',
+  'quiz.tfFalseButton': 'F',
   'status.questionTooltip': 'Veure detalls de la pregunta {{number}}',
 
   'areas.errorTitle': 'Error en carregar les àrees',

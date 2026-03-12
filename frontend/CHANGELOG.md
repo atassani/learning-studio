@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- feat(translation): True and False in the quiz, in English is shown as "T" and "F" instead of "V" and "F".
+- feat(translation): Accessible lables have been added to True and False in the quiz.
+
 ## [1.4.13] - 2026-03-01
 
 - feat(language-route): add `/studio/{lang}` entrypoint support for `es|en|ca` with 404 for unsupported languages

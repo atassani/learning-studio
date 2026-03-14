@@ -221,25 +221,22 @@ export function StatusGrid({
                 <div>
                   <h3 className="font-semibold text-gray-700 mb-2">{t('quiz.correctAnswer')}</h3>
                   {(() => {
-                    const isTrueAnswer = normalizeTrueFalseValue(selectedQuestion.answer) === 'TRUE';
+                    const isTrueAnswer =
+                      normalizeTrueFalseValue(selectedQuestion.answer) === 'TRUE';
                     return (
-                  <div
-                    className={`p-3 rounded border-l-4 ${
-                      isTrueAnswer
-                        ? 'bg-green-50 border-green-500'
-                        : 'bg-red-50 border-red-500'
-                    }`}
-                  >
-                    <span
-                      className={`font-medium ${
-                        isTrueAnswer
-                          ? 'text-green-800'
-                          : 'text-red-800'
-                      }`}
-                    >
-                      {isTrueAnswer ? t('status.trueLabel') : t('status.falseLabel')}
-                    </span>
-                  </div>
+                      <div
+                        className={`p-3 rounded border-l-4 ${
+                          isTrueAnswer ? 'bg-green-50 border-green-500' : 'bg-red-50 border-red-500'
+                        }`}
+                      >
+                        <span
+                          className={`font-medium ${
+                            isTrueAnswer ? 'text-green-800' : 'text-red-800'
+                          }`}
+                        >
+                          {isTrueAnswer ? t('status.trueLabel') : t('status.falseLabel')}
+                        </span>
+                      </div>
                     );
                   })()}
                 </div>

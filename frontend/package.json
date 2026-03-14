@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:data": "serve --cors --listen 4173 ../../learning-studio-data/data",
     "dev:data:test": "serve --cors --listen 4174 ../../learning-studio-data/test-data",
     "dev:playwright": "NODE_ENV=test next dev",
     "build": "next build",
@@ -48,7 +49,7 @@
     "jest-environment-jsdom": "^30.2.0",
     "jose": "^6.1.3",
     "prettier": "^3.8.0",
-    "serve": "^14.2.5",
+    "serve": "^14.2.6",
     "tailwindcss": "^4.0.7",
     "ts-jest": "^29.4.6",
     "typescript": "^5",

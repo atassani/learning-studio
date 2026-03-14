@@ -10,6 +10,7 @@ import {
   EMOJI_DONE,
 } from '../constants';
 import { useI18n } from '../i18n/I18nProvider';
+import { normalizeTrueFalseValue } from '../trueFalse';
 
 interface StatusGridProps {
   selectedArea: AreaType | null;
@@ -219,25 +220,28 @@ export function StatusGrid({
               {currentQuizType === 'True False' && (
                 <div>
                   <h3 className="font-semibold text-gray-700 mb-2">{t('quiz.correctAnswer')}</h3>
+                  {(() => {
+                    const isTrueAnswer = normalizeTrueFalseValue(selectedQuestion.answer) === 'TRUE';
+                    return (
                   <div
                     className={`p-3 rounded border-l-4 ${
-                      selectedQuestion.answer === 'V' || selectedQuestion.answer === 'Verdadero'
+                      isTrueAnswer
                         ? 'bg-green-50 border-green-500'
                         : 'bg-red-50 border-red-500'
                     }`}
                   >
                     <span
                       className={`font-medium ${
-                        selectedQuestion.answer === 'V' || selectedQuestion.answer === 'Verdadero'
+                        isTrueAnswer
                           ? 'text-green-800'
                           : 'text-red-800'
                       }`}
                     >
-                      {selectedQuestion.answer === 'V' || selectedQuestion.answer === 'Verdadero'
-                        ? t('status.trueLabel')
-                        : t('status.falseLabel')}
+                      {isTrueAnswer ? t('status.trueLabel') : t('status.falseLabel')}
                     </span>
                   </div>
+                    );
+                  })()}
                 </div>
               )}
 

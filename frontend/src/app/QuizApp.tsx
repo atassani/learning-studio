@@ -36,6 +36,7 @@ import {
 import { normalizeAreasPayload, normalizeQuestionsPayload } from './contentPayload';
 import { useI18n } from './i18n/I18nProvider';
 import { AppLanguage, isLanguageSelectionEnabled } from './i18n/config';
+import { normalizeTrueFalseValue } from './trueFalse';
 
 interface AreaConfigUser {
   username?: string;
@@ -1401,12 +1402,12 @@ export default function QuizApp() {
       let answerToStore = ans;
 
       if (currentQuizType === 'True False') {
+        const normalizedExpected = normalizeTrueFalseValue(expected);
+        const normalizedUser = normalizeTrueFalseValue(user);
         correct =
-          user === expected ||
-          (user === 'V' && expected === 'VERDADERO') ||
-          (user === 'F' && expected === 'FALSO') ||
-          (user === 'VERDADERO' && expected === 'V') ||
-          (user === 'FALSO' && expected === 'F');
+          normalizedExpected !== null &&
+          normalizedUser !== null &&
+          normalizedExpected === normalizedUser;
       } else if (currentQuizType === 'Multiple Choice') {
         const userLetter = user.toLowerCase();
         const userIndex = userLetter.charCodeAt(0) - 97;

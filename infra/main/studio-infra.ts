@@ -75,17 +75,17 @@ export class StudioInfra extends Construct {
       allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
       cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
     };
-    const staticBehavior: cloudfront.BehaviorOptions = props.edgeLambdas
-      ? { ...staticBehaviorOptions, edgeLambdas: props.edgeLambdas }
-      : {
-          ...staticBehaviorOptions,
-          functionAssociations: [
-            {
-              function: studioRoutingFunction,
-              eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
-            },
-          ],
-        };
+    const staticBehavior: cloudfront.BehaviorOptions = {
+      ...staticBehaviorOptions,
+      // Keep hashed static asset requests off Lambda@Edge to avoid throttling
+      // bursts after invalidations or deploys; only lightweight path rewrite is needed.
+      functionAssociations: [
+        {
+          function: studioRoutingFunction,
+          eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
+        },
+      ],
+    };
 
     const learningStateBehaviorOptions: cloudfront.BehaviorOptions = {
       origin: studioOrigin,

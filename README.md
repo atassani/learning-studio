@@ -33,6 +33,49 @@ data/
 package.json, package-lock.json, tsconfig.json, README.md, etc.
 ```
 
+### Despliegue frontend (dos fases)
+
+Para reducir errores `LambdaLimitExceeded` en CloudFront tras publicar una nueva versión:
+
+1. Fase 1 (publicación segura, sin borrar assets antiguos):
+
+```bash
+cd frontend
+scripts/deploy-frontend.sh
+```
+
+Qué hace:
+
+- `npm run check`
+- `npm run build`
+- `aws s3 sync out/ s3://studio.humblyproud.com/` (sin `--delete`)
+- invalidación solo de HTML de entrada (`/studio`, `/studio/`, `/studio/index.html`)
+
+2. Fase 2 (limpieza de assets obsoletos):
+
+```bash
+cd frontend
+scripts/cleanup-frontend-assets.sh
+```
+
+Cuándo ejecutar limpieza:
+
+- Recomendado: ~24 horas después de la publicación.
+- Si el tráfico es muy bajo, puedes hacerlo antes.
+- Si hay sesiones largas de usuarios, espera más (24-48h) para minimizar riesgo de clientes con chunks antiguos en memoria.
+
+Invalidación manual documentada:
+
+```bash
+cd frontend
+scripts/invalidate-frontend-cache.sh
+```
+
+Notas:
+
+- Evita invalidar `/studio/_next/*` salvo incidente excepcional.
+- Los chunks de Next están hasheados; normalmente no requieren invalidación global.
+
 ## Configuración de variables de entorno (.env)
 
 Las variables de entorno para cada proyecto se esperan en ficheros `.env`. `env.development.local` para desarrollo local, `.env.production` para producción, y `.env.test` para tests, incluidos los end-to-end con Playwright. Se incluye un fichero `.env.example` como referencia.

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+## [1.4.14] - 2026-03-21
+
+- fix(auth/i18n): stabilize auth/i18n bootstrap and e2e callback flow by handling 401/403 bootstrap reads, preventing hydration mismatch, and mocking callback test data routes
 - feat(translation): True and False in the quiz, in English is shown as "T" and "F" instead of "V" and "F".
 - feat(translation): Accessible lables have been added to True and False in the quiz.
 - fix (translation): Quiz results in True False are considered correct even if they are not "V" and "F".

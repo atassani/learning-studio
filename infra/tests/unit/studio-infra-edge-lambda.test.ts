@@ -48,6 +48,10 @@ test('passes edge lambdas to studio behaviors', () => {
     cloudfront.CachePolicy.CACHING_OPTIMIZED
   );
   expect(studio.behaviors['studio/_next/*'].origin).toBe(studio.behaviors['studio'].origin);
+  // Static hashed chunks should not invoke Lambda@Edge to avoid throttling bursts
+  // after invalidations; keep only lightweight CloudFront Function routing.
+  expect(studio.behaviors['studio/_next/*'].edgeLambdas).toBeUndefined();
+  expect(studio.behaviors['studio/_next/*'].functionAssociations).toHaveLength(1);
   expect(studio.behaviors['studio'].functionAssociations).toBeUndefined();
   expect(studio.behaviors['studio/*'].functionAssociations).toBeUndefined();
   expect(studio.behaviors['studio-data/*'].edgeLambdas).toBeUndefined();

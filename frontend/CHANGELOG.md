@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- fix(infra): prevent Lambda@Edge association on `studio/_next/*` to reduce CloudFront `LambdaLimitExceeded` risk on static chunk bursts
+- feat(deploy): switch frontend deploy to two-phase strategy (phase 1 publish without delete + HTML-only invalidation)
+- docs(deploy): add scripts and guidance for manual invalidation and delayed cleanup (`~24h` recommended)
+
 ## [1.4.14] - 2026-03-21
 
 - fix(auth/i18n): stabilize auth/i18n bootstrap and e2e callback flow by handling 401/403 bootstrap reads, preventing hydration mismatch, and mocking callback test data routes

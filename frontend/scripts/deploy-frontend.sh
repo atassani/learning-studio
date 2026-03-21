@@ -15,15 +15,17 @@ export SCRIPT_DIR
 OUT_DIR="$SCRIPT_DIR/../out"
 export OUT_DIR
 
-# Copy contents to S3 bucket root (Lambda@Edge strips /studio prefix)
-aws s3 sync "$OUT_DIR" s3://studio.humblyproud.com/ --delete --exclude ".DS_Store"
+BUCKET="studio.humblyproud.com"
+export BUCKET
 
-# Invalidate CloudFront cache
-DISTRIBUTION_ID=$(aws cloudfront list-distributions \
-  --query "DistributionList.Items[?Aliases.Items[?@=='humblyproud.com']].Id" \
-  --output text --no-cli-pager)
-export DISTRIBUTION_ID
+# Phase 1 deploy: upload new build WITHOUT delete.
+# This keeps older hashed chunks available for active sessions and avoids
+# edge/Lambda bursts after broad invalidations.
+aws s3 sync "$OUT_DIR" "s3://$BUCKET/" --exclude ".DS_Store"
 
-aws cloudfront create-invalidation \
-  --distribution-id "$DISTRIBUTION_ID" \
-  --paths "/studio" "/studio/" "/studio/index.html" "/studio/_next/*"
+# Invalidate only entry HTML routes. Do not invalidate /studio/_next/*.
+"$SCRIPT_DIR/invalidate-frontend-cache.sh"
+
+echo "✅ Phase 1 deployment complete"
+echo "ℹ️  Cleanup phase (delete old assets) should be run later, after cache/session drain."
+echo "ℹ️  Recommended: run ./scripts/cleanup-frontend-assets.sh around 24h after deployment."

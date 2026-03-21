@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { setupTestDataRoutes } from './helpers';
 
 // Set to true to enable debug logging
 const DEBUG_LOG = false;
@@ -8,6 +9,10 @@ function debugLog(...args: any[]) {
 
 // This test simulates the Cognito login callback (bypassing real Google/Cognito UI)
 test.describe('Cognito login flow (mocked)', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupTestDataRoutes(page);
+  });
+
   test('sets user as authenticated after callback', async ({ page }) => {
     // Log all outgoing requests for debugging
     page.on('request', (request) => {

@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import React from 'react';
 import {
   getDefaultLanguage,
@@ -66,7 +66,7 @@ describe('i18n', () => {
     expect(screen.getByTestId('loading').textContent).toBe('Cargando...');
   });
 
-  it('initializes provider language from persisted state when available', () => {
+  it('hydrates provider language from persisted state when available', async () => {
     process.env.NEXT_PUBLIC_FORCE_TEST_LANGUAGE = 'true';
     process.env.NEXT_PUBLIC_DEFAULT_LANGUAGE = 'en';
     localStorage.setItem('learningStudio', JSON.stringify({ areas: {}, language: 'ca' }));
@@ -77,8 +77,10 @@ describe('i18n', () => {
       </I18nProvider>
     );
 
-    expect(screen.getByTestId('lang').textContent).toBe('ca');
-    expect(screen.getByTestId('loading').textContent).toBe('Carregant...');
+    await waitFor(() => {
+      expect(screen.getByTestId('lang').textContent).toBe('ca');
+      expect(screen.getByTestId('loading').textContent).toBe('Carregant...');
+    });
   });
 
   it('parses language config flags correctly', () => {

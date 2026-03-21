@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useCallback, useContext, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { AppLanguage, getDefaultLanguage, normalizeLanguage } from './config';
 import { MessageKey, TranslationValues, translate } from './messages';
 
@@ -13,27 +13,41 @@ interface I18nContextValue {
 const I18nContext = createContext<I18nContextValue | undefined>(undefined);
 
 function getInitialLanguage(): AppLanguage {
-  const fallback = getDefaultLanguage();
+  // Keep SSR and first client render aligned to avoid hydration mismatch.
+  return getDefaultLanguage();
+}
+
+function getPersistedLanguage(): AppLanguage | null {
   if (typeof window === 'undefined') {
-    return fallback;
+    return null;
   }
 
   try {
     const raw = window.localStorage.getItem('learningStudio');
-    if (!raw) return fallback;
+    if (!raw) return null;
     const parsed = JSON.parse(raw) as { language?: unknown };
     if (typeof parsed.language === 'string') {
       return normalizeLanguage(parsed.language);
     }
   } catch {
-    return fallback;
+    return null;
   }
 
-  return fallback;
+  return null;
 }
 
 export function I18nProvider({ children }: { children: React.ReactNode }) {
   const [activeLanguage, setActiveLanguageState] = useState<AppLanguage>(getInitialLanguage());
+
+  useEffect(() => {
+    const persistedLanguage = getPersistedLanguage();
+    if (!persistedLanguage) {
+      return;
+    }
+    setActiveLanguageState((current) =>
+      current === persistedLanguage ? current : normalizeLanguage(persistedLanguage)
+    );
+  }, []);
 
   const setActiveLanguage = useCallback((language: AppLanguage) => {
     setActiveLanguageState(normalizeLanguage(language));

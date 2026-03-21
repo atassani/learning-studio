@@ -89,6 +89,12 @@ export async function getLearningState(scope = 'global'): Promise<LearningStateR
     logDynamoDbCall('GET', scope, 'error');
     return null;
   }
+  if (response.status === 401 || response.status === 403) {
+    // During auth/bootstrap transitions, unauthorized responses are expected.
+    // Returning null avoids noisy error logs while preserving local fallback behavior.
+    logDynamoDbCall('GET', scope, 'error');
+    return null;
+  }
   if (!response.ok) {
     logDynamoDbCall('GET', scope, 'error');
     throw new Error(`Failed to fetch learning state: ${response.status}`);
@@ -135,6 +141,12 @@ export async function getLearningStateForAuthBootstrap(
   }
 
   if (response.status === 404) {
+    logDynamoDbCall('GET', scope, 'error');
+    return null;
+  }
+  if (response.status === 401 || response.status === 403) {
+    // During auth/bootstrap transitions, unauthorized responses are expected.
+    // Returning null avoids noisy error logs while preserving local fallback behavior.
     logDynamoDbCall('GET', scope, 'error');
     return null;
   }

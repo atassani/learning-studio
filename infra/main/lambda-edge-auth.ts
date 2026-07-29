@@ -195,6 +195,24 @@ function extractCookieValue(cookieHeader: string | undefined, name: string): str
   return match ? match[1] : undefined;
 }
 
+// Cached at module scope so a warm Lambda@Edge container reuses the fetched
+// JWKS across invocations instead of hitting Cognito's JWKS endpoint on
+// every single authenticated request. jose's returned JWKS set caches keys
+// internally once fetched, but only if the same instance is reused.
+let cachedJwks: { url: string; jwks: unknown } | null = null;
+
+function getJwks(jwksUrl: string): unknown {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { createRemoteJWKSet } = require('jose');
+  if (!cachedJwks || cachedJwks.url !== jwksUrl) {
+    cachedJwks = {
+      url: jwksUrl,
+      jwks: createRemoteJWKSet(new URL(jwksUrl), { timeoutDuration: TOKEN_REQUEST_TIMEOUT_MS }),
+    };
+  }
+  return cachedJwks.jwks;
+}
+
 export async function getJwtPayload(
   cookie: string | undefined
 ): Promise<Record<string, any> | null> {
@@ -203,8 +221,8 @@ export async function getJwtPayload(
   if (!issuer || !jwksUrl) return null;
   // Import jose only when needed (avoids ESM parse errors in Jest)
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { jwtVerify, createRemoteJWKSet } = require('jose');
-  const jwks = createRemoteJWKSet(new URL(jwksUrl), { timeoutDuration: TOKEN_REQUEST_TIMEOUT_MS });
+  const { jwtVerify } = require('jose');
+  const jwks = getJwks(jwksUrl);
   const token = extractCookieValue(cookie, 'jwt');
   if (!token) return null;
   try {

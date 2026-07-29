@@ -85,12 +85,25 @@ function readEdgeAuthConfig(): {
   }
 }
 
+interface TokenResponse {
+  id_token?: string;
+  access_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+}
+
+// Origin-request Lambda@Edge gets a 30s execution budget, but these calls
+// still need an explicit cap - an unbounded network call can hang and burn
+// the whole budget, turning a slow Cognito response into a hard failure
+// instead of a fast, retryable one.
+const TOKEN_REQUEST_TIMEOUT_MS = 8000;
+
 export async function exchangeCodeForTokens(params: {
   code: string;
   redirectUri: string;
   clientId: string;
   domain: string;
-}): Promise<{ id_token?: string } | null> {
+}): Promise<TokenResponse | null> {
   const tokenUrl = new URL('/oauth2/token', params.domain);
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
@@ -100,6 +113,7 @@ export async function exchangeCodeForTokens(params: {
   }).toString();
 
   const responseBody = await postForm(tokenUrl, body);
+  if (responseBody === null) return null;
   try {
     return JSON.parse(responseBody);
   } catch (err) {
@@ -113,8 +127,38 @@ export function setExchangeCodeForTokensImpl(impl: typeof exchangeCodeForTokens 
   exchangeCodeForTokensImpl = impl ?? exchangeCodeForTokens;
 }
 
-function postForm(url: URL, body: string): Promise<string> {
-  return new Promise((resolve, reject) => {
+export async function refreshTokens(params: {
+  refreshToken: string;
+  clientId: string;
+  domain: string;
+}): Promise<TokenResponse | null> {
+  const tokenUrl = new URL('/oauth2/token', params.domain);
+  const body = new URLSearchParams({
+    grant_type: 'refresh_token',
+    client_id: params.clientId,
+    refresh_token: params.refreshToken,
+  }).toString();
+
+  const responseBody = await postForm(tokenUrl, body);
+  if (responseBody === null) return null;
+  try {
+    return JSON.parse(responseBody);
+  } catch (err) {
+    return null;
+  }
+}
+
+let refreshTokensImpl = refreshTokens;
+
+export function setRefreshTokensImpl(impl: typeof refreshTokens | null): void {
+  refreshTokensImpl = impl ?? refreshTokens;
+}
+
+// Resolves to the response body on success, or null on network error/timeout
+// so callers can treat "couldn't reach Cognito" the same as "Cognito said no"
+// rather than letting an unhandled rejection propagate.
+function postForm(url: URL, body: string): Promise<string | null> {
+  return new Promise((resolve) => {
     const request = https.request(
       {
         protocol: url.protocol,
@@ -135,10 +179,20 @@ function postForm(url: URL, body: string): Promise<string> {
       }
     );
 
-    request.on('error', reject);
+    request.setTimeout(TOKEN_REQUEST_TIMEOUT_MS, () => {
+      request.destroy();
+      resolve(null);
+    });
+    request.on('error', () => resolve(null));
     request.write(body);
     request.end();
   });
+}
+
+function extractCookieValue(cookieHeader: string | undefined, name: string): string | undefined {
+  if (!cookieHeader) return undefined;
+  const match = cookieHeader.match(new RegExp(`${name}=([^;]+)`));
+  return match ? match[1] : undefined;
 }
 
 export async function getJwtPayload(
@@ -150,11 +204,9 @@ export async function getJwtPayload(
   // Import jose only when needed (avoids ESM parse errors in Jest)
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { jwtVerify, createRemoteJWKSet } = require('jose');
-  const jwks = createRemoteJWKSet(new URL(jwksUrl));
-  // Extract JWT from cookie (assume cookie is 'jwt=<token>' or similar)
-  const match = cookie.match(/jwt=([^;]+)/);
-  if (!match) return null;
-  const token = match[1];
+  const jwks = createRemoteJWKSet(new URL(jwksUrl), { timeoutDuration: TOKEN_REQUEST_TIMEOUT_MS });
+  const token = extractCookieValue(cookie, 'jwt');
+  if (!token) return null;
   try {
     const { payload } = await jwtVerify(token, jwks, {
       issuer,
@@ -176,6 +228,82 @@ let getJwtPayloadImpl = getJwtPayload;
 
 export function setGetJwtPayloadImpl(impl: typeof getJwtPayload | null): void {
   getJwtPayloadImpl = impl ?? getJwtPayload;
+}
+
+// Cognito refresh tokens default to 30 days of validity on the App Client;
+// keep this in sync with that setting if it's ever changed in Cognito.
+const REFRESH_TOKEN_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+
+function buildAuthCookies(tokens: { id_token: string; refresh_token?: string }): {
+  key: string;
+  value: string;
+}[] {
+  const cookies = [
+    { key: 'Set-Cookie', value: ['jwt=' + tokens.id_token, 'Path=/', 'HttpOnly', 'Secure', 'SameSite=Lax'].join('; ') },
+    { key: 'Set-Cookie', value: ['auth=1', 'Path=/', 'Secure', 'SameSite=Lax'].join('; ') },
+  ];
+  if (tokens.refresh_token) {
+    cookies.push({
+      key: 'Set-Cookie',
+      value: [
+        'refresh_token=' + tokens.refresh_token,
+        'Path=/',
+        'Max-Age=' + REFRESH_TOKEN_MAX_AGE_SECONDS,
+        'HttpOnly',
+        'Secure',
+        'SameSite=Lax',
+      ].join('; '),
+    });
+  }
+  return cookies;
+}
+
+interface AuthResolution {
+  payload: Record<string, any> | null;
+  refreshSetCookies?: { key: string; value: string }[];
+}
+
+// Tries the id token first; if it's missing/expired, attempts one silent
+// refresh via the refresh_token cookie before giving up. Without this, a
+// session silently dies whenever the short-lived id token expires (~1h by
+// default) even though the user never logged out.
+async function resolveAuthenticatedPayload(
+  cookieHeader: string | undefined,
+  cognitoConfig: { domain?: string; clientId?: string }
+): Promise<AuthResolution> {
+  const payload = await getJwtPayloadImpl(cookieHeader);
+  if (payload) {
+    return { payload };
+  }
+
+  const refreshToken = extractCookieValue(cookieHeader, 'refresh_token');
+  if (!refreshToken || !cognitoConfig.domain || !cognitoConfig.clientId) {
+    return { payload: null };
+  }
+
+  const refreshed = await refreshTokensImpl({
+    refreshToken,
+    clientId: cognitoConfig.clientId,
+    domain: cognitoConfig.domain,
+  });
+  if (!refreshed?.id_token) {
+    return { payload: null };
+  }
+
+  const refreshedPayload = await getJwtPayloadImpl(`jwt=${refreshed.id_token}`);
+  if (!refreshedPayload) {
+    return { payload: null };
+  }
+
+  // Cognito doesn't rotate refresh tokens on a refresh grant by default, so
+  // keep the existing one unless a new one was returned.
+  return {
+    payload: refreshedPayload,
+    refreshSetCookies: buildAuthCookies({
+      id_token: refreshed.id_token,
+      refresh_token: refreshed.refresh_token ?? refreshToken,
+    }),
+  };
 }
 
 let learningStateStoreImpl: LearningStateStore | null | undefined;
@@ -421,12 +549,17 @@ function maybeRewriteSpaPath(request: CloudFrontRequest): void {
   request.uri = stripped + '/index.html';
 }
 
-function jsonResponse(status: string, body: unknown): CloudFrontRequestResult {
+function jsonResponse(
+  status: string,
+  body: unknown,
+  setCookies?: { key: string; value: string }[]
+): CloudFrontRequestResult {
   return {
     status,
     headers: {
       'content-type': [{ key: 'Content-Type', value: 'application/json' }],
       'cache-control': [{ key: 'Cache-Control', value: 'no-store' }],
+      ...(setCookies ? { 'set-cookie': setCookies } : {}),
     },
     body: JSON.stringify(body),
   };
@@ -490,7 +623,10 @@ export async function handler(event: CloudFrontRequestEvent): Promise<CloudFront
   const { domain, clientId, redirectSignIn, redirectSignOut } = getCognitoConfig();
 
   if (uri.startsWith('/studio/me')) {
-    const payload = await getJwtPayloadImpl(cookieHeader);
+    const { payload, refreshSetCookies } = await resolveAuthenticatedPayload(cookieHeader, {
+      domain,
+      clientId,
+    });
     if (!payload) {
       return {
         status: '401',
@@ -518,13 +654,17 @@ export async function handler(event: CloudFrontRequestEvent): Promise<CloudFront
       headers: {
         'content-type': [{ key: 'Content-Type', value: 'application/json' }],
         'cache-control': [{ key: 'Cache-Control', value: 'no-store' }],
+        ...(refreshSetCookies ? { 'set-cookie': refreshSetCookies } : {}),
       },
       body: JSON.stringify(user),
     };
   }
 
   if (uri.startsWith('/studio/learning-state')) {
-    const payload = await getJwtPayloadImpl(cookieHeader);
+    const { payload, refreshSetCookies } = await resolveAuthenticatedPayload(cookieHeader, {
+      domain,
+      clientId,
+    });
     if (!payload?.sub) {
       return jsonResponse('401', { error: 'unauthorized' });
     }
@@ -581,11 +721,15 @@ export async function handler(event: CloudFrontRequestEvent): Promise<CloudFront
           }
         }
 
-        return jsonResponse('200', {
-          scope,
-          state: state.state,
-          updatedAt: state.updatedAt,
-        });
+        return jsonResponse(
+          '200',
+          {
+            scope,
+            state: state.state,
+            updatedAt: state.updatedAt,
+          },
+          refreshSetCookies
+        );
       } catch {
         return jsonResponse('500', { error: 'learning_state_read_failed' });
       }
@@ -608,7 +752,7 @@ export async function handler(event: CloudFrontRequestEvent): Promise<CloudFront
             typeof body.clientUpdatedAt === 'string' ? body.clientUpdatedAt : undefined,
           userEmail: typeof payload.email === 'string' ? payload.email : undefined,
         });
-        return jsonResponse('200', { scope, updatedAt });
+        return jsonResponse('200', { scope, updatedAt }, refreshSetCookies);
       } catch {
         return jsonResponse('500', { error: 'learning_state_write_failed' });
       }
@@ -677,33 +821,58 @@ export async function handler(event: CloudFrontRequestEvent): Promise<CloudFront
     });
 
     if (tokens?.id_token) {
-      const cookie = [
-        `jwt=${tokens.id_token}`,
-        'Path=/',
-        'HttpOnly',
-        'Secure',
-        'SameSite=Lax',
-      ].join('; ');
-      const authCookie = ['auth=1', 'Path=/', 'Secure', 'SameSite=Lax'].join('; ');
-
       return {
         status: '302',
         statusDescription: 'Found',
         headers: {
           location: [{ key: 'Location', value: redirectSignIn }],
           'cache-control': [{ key: 'Cache-Control', value: 'no-cache' }],
-          'set-cookie': [
-            { key: 'Set-Cookie', value: cookie },
-            { key: 'Set-Cookie', value: authCookie },
-          ],
+          'set-cookie': buildAuthCookies({
+            id_token: tokens.id_token,
+            refresh_token: tokens.refresh_token,
+          }),
         },
         body: '',
       };
     }
+
+    // The authorization code is single-use and has now been consumed by the
+    // failed exchange attempt above (network timeout, Cognito error, etc.).
+    // Redirect to a clean login URL rather than falling through silently -
+    // otherwise a page refresh would resend the same dead code and fail
+    // again with no visible feedback.
+    return {
+      status: '302',
+      statusDescription: 'Found',
+      headers: {
+        location: [{ key: 'Location', value: LOGIN_URL }],
+        'cache-control': [{ key: 'Cache-Control', value: 'no-cache' }],
+      },
+      body: '',
+    };
   }
 
-  // Allow if valid JWT/cookie
-  if (await isValidJWT(cookieHeader)) {
+  // Allow if valid JWT/cookie, refreshing a silently-expired session once
+  // before giving up.
+  const { payload: mainPayload, refreshSetCookies: mainRefreshSetCookies } =
+    await resolveAuthenticatedPayload(cookieHeader, { domain, clientId });
+  if (mainPayload) {
+    if (mainRefreshSetCookies) {
+      // This behavior only allows GET/HEAD, so redirecting to the same URL
+      // is safe. A pass-through `request` result can't carry Set-Cookie
+      // headers back to the viewer, so the refreshed session is delivered
+      // via one redirect and picked up on the follow-up request.
+      return {
+        status: '302',
+        statusDescription: 'Found',
+        headers: {
+          location: [{ key: 'Location', value: uri + (querystring ? `?${querystring}` : '') }],
+          'cache-control': [{ key: 'Cache-Control', value: 'no-cache' }],
+          'set-cookie': mainRefreshSetCookies,
+        },
+        body: '',
+      };
+    }
     maybeRewriteSpaPath(request);
     return request;
   }

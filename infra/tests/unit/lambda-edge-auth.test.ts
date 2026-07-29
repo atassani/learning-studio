@@ -39,13 +39,6 @@ describe('Lambda@Edge Auth Handler', () => {
     authModule.setLearningStateStoreImpl(null);
   });
 
-  beforeAll(() => {
-    // Mock isValidJWT to avoid real JWT validation/network
-    jest.spyOn(authModule, 'isValidJWT').mockImplementation(async (cookie: string | undefined) => {
-      // Simulate valid JWT only if cookie is 'jwt=valid'
-      return cookie === 'jwt=valid';
-    });
-  });
   function makeEvent({
     uri,
     cookie,
@@ -231,6 +224,131 @@ describe('Lambda@Edge Auth Handler', () => {
     }
 
     authModule.setExchangeCodeForTokensImpl(null);
+  });
+
+  it('should redirect to login when code exchange fails on a non-/studio/app path', async () => {
+    // Previously a failed exchange on any path other than /studio/app fell
+    // through silently to public access, leaving the dead single-use code
+    // in the URL with no way to retry cleanly.
+    process.env.NEXT_PUBLIC_COGNITO_DOMAIN = 'https://example.auth';
+    process.env.NEXT_PUBLIC_COGNITO_CLIENT_ID = 'client-id';
+    process.env.NEXT_PUBLIC_REDIRECT_SIGN_IN = 'https://humblyproud.com/studio';
+
+    const exchangeMock = jest.fn().mockResolvedValue(null);
+    authModule.setExchangeCodeForTokensImpl(exchangeMock);
+
+    const event = makeEvent({ uri: '/studio', cookie: undefined }) as any;
+    event.Records[0].cf.request.querystring = 'code=bad_code';
+
+    const result = await authModule.handler(event);
+
+    if (result && 'status' in result) {
+      expect(result.status).toBe('302');
+      expect(result.headers?.location?.[0]?.value).toContain('/studio/login');
+    } else {
+      throw new Error('Expected a redirect response');
+    }
+
+    authModule.setExchangeCodeForTokensImpl(null);
+  });
+
+  it('should silently refresh an expired session and redirect back with new cookies', async () => {
+    process.env.NEXT_PUBLIC_COGNITO_DOMAIN = 'https://example.auth';
+    process.env.NEXT_PUBLIC_COGNITO_CLIENT_ID = 'client-id';
+
+    authModule.setGetJwtPayloadImpl(async (cookie) =>
+      cookie === 'jwt=fresh-token' ? { sub: 'user-123' } : null
+    );
+    const refreshMock = jest.fn().mockResolvedValue({ id_token: 'fresh-token' });
+    authModule.setRefreshTokensImpl(refreshMock);
+
+    const event = makeEvent({
+      uri: '/studio/app',
+      cookie: 'jwt=expired; refresh_token=refresh-abc',
+    }) as any;
+
+    const result = await authModule.handler(event);
+
+    expect(refreshMock).toHaveBeenCalledWith({
+      refreshToken: 'refresh-abc',
+      clientId: 'client-id',
+      domain: 'https://example.auth',
+    });
+
+    if (result && 'status' in result) {
+      expect(result.status).toBe('302');
+      expect(result.headers?.location?.[0]?.value).toBe('/studio/app');
+      const setCookies = (result.headers?.['set-cookie'] || []).map((c) => c.value);
+      expect(setCookies.some((c) => c.includes('jwt=fresh-token'))).toBe(true);
+      expect(setCookies.some((c) => c.includes('refresh_token=refresh-abc'))).toBe(true);
+    } else {
+      throw new Error('Expected a redirect response');
+    }
+
+    authModule.setGetJwtPayloadImpl(null);
+    authModule.setRefreshTokensImpl(null);
+  });
+
+  it('should redirect to login when the refresh token is invalid or missing', async () => {
+    process.env.NEXT_PUBLIC_COGNITO_DOMAIN = 'https://example.auth';
+    process.env.NEXT_PUBLIC_COGNITO_CLIENT_ID = 'client-id';
+
+    authModule.setGetJwtPayloadImpl(async () => null);
+    const refreshMock = jest.fn().mockResolvedValue(null);
+    authModule.setRefreshTokensImpl(refreshMock);
+
+    const event = makeEvent({
+      uri: '/studio/app',
+      cookie: 'jwt=expired; refresh_token=stale-refresh',
+    }) as any;
+
+    const result = await authModule.handler(event);
+
+    if (result && 'status' in result) {
+      expect(result.status).toBe('302');
+      expect(result.headers?.location?.[0]?.value).toContain('/studio/login');
+    } else {
+      throw new Error('Expected a redirect response');
+    }
+
+    authModule.setGetJwtPayloadImpl(null);
+    authModule.setRefreshTokensImpl(null);
+  });
+
+  it('should set refreshed cookies on a /studio/learning-state response', async () => {
+    process.env.NEXT_PUBLIC_COGNITO_DOMAIN = 'https://example.auth';
+    process.env.NEXT_PUBLIC_COGNITO_CLIENT_ID = 'client-id';
+
+    authModule.setGetJwtPayloadImpl(async (cookie) =>
+      cookie === 'jwt=fresh-token' ? { sub: 'user-123' } : null
+    );
+    authModule.setRefreshTokensImpl(async () => ({ id_token: 'fresh-token' }));
+    authModule.setLearningStateStoreImpl({
+      async get() {
+        return { state: { currentArea: 'fdl' }, updatedAt: '2026-01-01T00:00:00.000Z' };
+      },
+      async put() {},
+    });
+
+    const event = makeEvent({
+      uri: '/studio/learning-state',
+      cookie: 'jwt=expired; refresh_token=refresh-abc',
+      querystring: 'scope=global',
+    });
+
+    const result = await authModule.handler(event as any);
+
+    if (result && 'status' in result) {
+      expect(result.status).toBe('200');
+      const setCookies = (result.headers?.['set-cookie'] || []).map((c) => c.value);
+      expect(setCookies.some((c) => c.includes('jwt=fresh-token'))).toBe(true);
+    } else {
+      throw new Error('Expected a response');
+    }
+
+    authModule.setGetJwtPayloadImpl(null);
+    authModule.setRefreshTokensImpl(null);
+    authModule.setLearningStateStoreImpl(null);
   });
 
   it('should skip code exchange when env is missing', async () => {

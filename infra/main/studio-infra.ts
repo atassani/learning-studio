@@ -48,6 +48,20 @@ export class StudioInfra extends Construct {
       code: cloudfront.FunctionCode.fromInline(studioDataCode),
     });
 
+    // ORIGIN_REQUEST Lambda@Edge only sees the cookies/query strings/headers
+    // that CloudFront is configured to forward - unlike VIEWER_REQUEST, which
+    // sees the raw untouched request. The edge auth handler needs the "cookie"
+    // header (jwt/auth session cookies) and query strings (OAuth "code" on
+    // callback, "scope" on learning-state requests), so both must be
+    // explicitly forwarded here or auth silently breaks.
+    const studioOriginRequestPolicy = props.edgeLambdas
+      ? new cloudfront.OriginRequestPolicy(this, 'StudioOriginRequestPolicy', {
+          cookieBehavior: cloudfront.OriginRequestCookieBehavior.all(),
+          queryStringBehavior: cloudfront.OriginRequestQueryStringBehavior.all(),
+          headerBehavior: cloudfront.OriginRequestHeaderBehavior.allowList('Accept-Language'),
+        })
+      : undefined;
+
     const studioOrigin = S3BucketOrigin.withOriginAccessControl(this.studioBucket);
     const htmlBehaviorOptions: cloudfront.BehaviorOptions = {
       origin: studioOrigin,
@@ -55,6 +69,7 @@ export class StudioInfra extends Construct {
       compress: true,
       allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
       cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+      ...(studioOriginRequestPolicy ? { originRequestPolicy: studioOriginRequestPolicy } : {}),
     };
     const behaviorOptions: cloudfront.BehaviorOptions = props.edgeLambdas
       ? { ...htmlBehaviorOptions, edgeLambdas: props.edgeLambdas }
@@ -93,6 +108,7 @@ export class StudioInfra extends Construct {
       compress: true,
       allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
       cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+      ...(studioOriginRequestPolicy ? { originRequestPolicy: studioOriginRequestPolicy } : {}),
     };
     const learningStateBehavior: cloudfront.BehaviorOptions = props.edgeLambdas
       ? {

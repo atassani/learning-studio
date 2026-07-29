@@ -275,29 +275,51 @@ export default function QuizApp() {
         headers['If-None-Match'] = cachedEtag;
       }
 
-      const response = await fetch(url, {
-        headers,
-        cache: 'no-cache',
-      });
+      // Retry transient failures (network errors, 5xx) with backoff. Without
+      // this, a single blip on a CDN/origin edge case leaves the loading
+      // spinner stuck forever - nothing else in this chain has a timeout or
+      // fallback, so a failed fetch here was a dead end (bug found 2026-07-29:
+      // an intermittent 503 on studio-data hung the quiz page indefinitely).
+      const maxAttempts = 3;
+      let lastError: unknown;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (attempt > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 400 * 2 ** (attempt - 1)));
+        }
+        try {
+          const response = await fetch(url, {
+            headers,
+            cache: 'no-cache',
+          });
 
-      if (response.status === 304) {
-        const cached = safeLocalStorage.get(cacheKey);
-        if (cached) {
-          return JSON.parse(cached);
+          if (response.status === 304) {
+            const cached = safeLocalStorage.get(cacheKey);
+            if (cached) {
+              return JSON.parse(cached);
+            }
+          }
+
+          if (!response.ok) {
+            // 4xx won't be fixed by retrying; only retry server/transient errors.
+            if (response.status < 500) {
+              throw new Error(`Error ${response.status}: ${response.statusText}`);
+            }
+            lastError = new Error(`Error ${response.status}: ${response.statusText}`);
+            continue;
+          }
+
+          const data = await response.json();
+          const etag = response.headers?.get?.('ETag');
+          if (etag) {
+            safeLocalStorage.set(etagKey, etag);
+          }
+          safeLocalStorage.set(cacheKey, JSON.stringify(data));
+          return data;
+        } catch (err) {
+          lastError = err;
         }
       }
-
-      if (!response.ok) {
-        throw new Error(`Error ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      const etag = response.headers?.get?.('ETag');
-      if (etag) {
-        safeLocalStorage.set(etagKey, etag);
-      }
-      safeLocalStorage.set(cacheKey, JSON.stringify(data));
-      return data;
+      throw lastError instanceof Error ? lastError : new Error('Failed to fetch after retries');
     },
     [safeLocalStorage]
   );
@@ -933,6 +955,21 @@ export default function QuizApp() {
     answerShuffleSeedRef.current = 0;
   }, [selectedArea]);
 
+  // Reset to the area-selection screen. Used both when loading questions
+  // fails outright and as a last-resort watchdog fallback (see below) -
+  // avoids the loading spinner ever being a dead end.
+  const resetToAreaSelection = useCallback(() => {
+    storage.setCurrentArea(undefined);
+    setSelectedArea(null);
+    setCurrentQuizType(null);
+    setShowAreaSelection(true);
+    setShowStatus(false);
+    setShowResult(null);
+    setShowSelectionMenu(true);
+    setQuestions([]);
+    setCurrent(null);
+  }, []);
+
   // Shared function to load area questions and restore progress
   const loadAreaAndQuestions = async (area: AreaType, forceMenu = false) => {
     // Track the current area being loaded to prevent race conditions
@@ -1098,15 +1135,7 @@ export default function QuizApp() {
     }
     // Fail-safe fallback: avoid spinner lock when selected area/questions are inconsistent
     // (e.g. stale/cross-language payload race in deployed caches).
-    storage.setCurrentArea(undefined);
-    setSelectedArea(null);
-    setCurrentQuizType(null);
-    setShowAreaSelection(true);
-    setShowStatus(false);
-    setShowResult(null);
-    setShowSelectionMenu(true);
-    setQuestions([]);
-    setCurrent(null);
+    resetToAreaSelection();
   };
 
   // Get quiz logic functions from custom hook
@@ -1642,6 +1671,42 @@ export default function QuizApp() {
 
   const allAnswered =
     questions.length > 0 && Object.values(status).filter((s) => s === 'pending').length === 0;
+
+  // Watchdog: mirrors the "loading questions" spinner condition in
+  // renderContent() below. If we're stuck there for too long, force a
+  // reset instead of leaving the user on an infinite spinner. This is a
+  // last-resort backstop on top of loadAreaAndQuestions' own try/catch
+  // fallback - found 2026-07-29 after an intermittent CDN/origin failure
+  // left the app stuck on "Loading..." indefinitely with no recovery path.
+  useEffect(() => {
+    const isLoadingQuestions =
+      !showAreaSelection &&
+      !!selectedArea &&
+      !questions.length &&
+      !showSelectionMenu &&
+      !showResult &&
+      !showStatus &&
+      !allAnswered;
+
+    if (!isLoadingQuestions) return;
+
+    const timer = setTimeout(() => {
+      console.error('Timed out loading questions - resetting to area selection');
+      resetToAreaSelection();
+    }, 15000);
+
+    return () => clearTimeout(timer);
+  }, [
+    showAreaSelection,
+    selectedArea,
+    questions.length,
+    showSelectionMenu,
+    showResult,
+    showStatus,
+    allAnswered,
+    resetToAreaSelection,
+  ]);
+
   const renderContent = () => {
     const isAuthBootstrapPending = canConfigureAreas && !learningStateBootstrapCompleted;
 

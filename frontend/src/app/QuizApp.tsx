@@ -280,11 +280,18 @@ export default function QuizApp() {
       // spinner stuck forever - nothing else in this chain has a timeout or
       // fallback, so a failed fetch here was a dead end (bug found 2026-07-29:
       // an intermittent 503 on studio-data hung the quiz page indefinitely).
-      const maxAttempts = 3;
+      //
+      // 2026-07-30: 3 attempts (400ms/800ms backoff, ~1.2s total) wasn't
+      // enough - studio-data is a low-traffic S3 bucket, and a real page
+      // load fires ~15+ concurrent requests at once (JS chunks, fonts, CSS,
+      // plus these data files), which can trip S3's "sudden burst" SlowDown
+      // (503) behavior for longer than 1.2s. Widened to 5 attempts with a
+      // longer backoff (~7.5s total) to give that more room to clear.
+      const maxAttempts = 5;
       let lastError: unknown;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         if (attempt > 0) {
-          await new Promise((resolve) => setTimeout(resolve, 400 * 2 ** (attempt - 1)));
+          await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** (attempt - 1)));
         }
         try {
           const response = await fetch(url, {
@@ -1705,6 +1712,49 @@ export default function QuizApp() {
     showStatus,
     allAnswered,
     resetToAreaSelection,
+  ]);
+
+  // Watchdog for the earlier bootstrap/loading spinners (auth bootstrap,
+  // initial route resolution, areas loading) - mirrors their conditions in
+  // renderContent() below. Unlike the "loading questions" watchdog above,
+  // there's no in-app state to reset back to here (no area/questions are
+  // selected yet), so the recovery is a one-time reload instead - guarded
+  // by sessionStorage so a persistent failure shows a stuck spinner rather
+  // than reload-looping forever. Found 2026-07-30: the existing retry logic
+  // in fetchJsonWithCache handles a failed fetch, but nothing previously
+  // caught the case where these gating conditions themselves never settled.
+  useEffect(() => {
+    const isAuthBootstrapPending = canConfigureAreas && !learningStateBootstrapCompleted;
+    const isStuckBootstrapping =
+      isAuthBootstrapPending ||
+      ((!initialRouteResolved || (areas.length > 0 && !visibleAreasReady)) && !areasError) ||
+      (!areasLoaded && !areasError);
+
+    const reloadKey = 'studio-bootstrap-watchdog-reload';
+    if (!isStuckBootstrapping) {
+      window.sessionStorage.removeItem(reloadKey);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      if (window.sessionStorage.getItem(reloadKey)) {
+        console.error('Timed out bootstrapping again after a reload - giving up auto-recovery');
+        return;
+      }
+      console.error('Timed out bootstrapping - reloading');
+      window.sessionStorage.setItem(reloadKey, '1');
+      window.location.reload();
+    }, 15000);
+
+    return () => clearTimeout(timer);
+  }, [
+    canConfigureAreas,
+    learningStateBootstrapCompleted,
+    initialRouteResolved,
+    areas.length,
+    visibleAreasReady,
+    areasError,
+    areasLoaded,
   ]);
 
   const renderContent = () => {

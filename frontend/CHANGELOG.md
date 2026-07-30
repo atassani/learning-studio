@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- fix(persistence): sanitize local and authenticated remote quiz state before route restoration, write repaired snapshots back, and deduplicate bootstrap/area loads
+- fix(quiz): recover from empty or stale persisted resume state instead of hanging on the loading spinner
+- fix(data-cache): retry unusable `304` responses without a stale ETag and avoid retrying `4xx` responses
 - fix(infra): prevent Lambda@Edge association on `studio/_next/*` to reduce CloudFront `LambdaLimitExceeded` risk on static chunk bursts
 - feat(deploy): switch frontend deploy to two-phase strategy (phase 1 publish without delete + HTML-only invalidation)
 - docs(deploy): add scripts and guidance for manual invalidation and delayed cleanup (`~24h` recommended)

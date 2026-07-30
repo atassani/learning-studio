@@ -38,7 +38,7 @@ export function useQuizLogic({
 }: UseQuizLogicProps) {
   // Start quiz with all questions
   const startQuizAll = useCallback(() => {
-    if (!selectedArea) return;
+    if (!selectedArea || allQuestions.length === 0) return;
 
     const areaKey = selectedArea.shortName;
     const orderedQuestions = [...allQuestions];
@@ -124,6 +124,7 @@ export function useQuizLogic({
 
     const areaKey = selectedArea.shortName;
     const filtered = allQuestions.filter((q) => selectedSections.has(q.section));
+    if (filtered.length === 0) return;
 
     const orderedQuestions = [...filtered];
 
@@ -209,6 +210,7 @@ export function useQuizLogic({
 
     const areaKey = selectedArea.shortName;
     const filtered = allQuestions.filter((q) => selectedQuestions.has(q.index));
+    if (filtered.length === 0) return;
 
     const orderedQuestions = [...filtered];
 

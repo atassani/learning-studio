@@ -4,7 +4,8 @@ const LOCAL_STORAGE_KEY = 'learningStudio';
 const ROUTE_LANGUAGE_OVERRIDE_STORAGE_KEY = 'learningStudioRouteLanguageOverride';
 export const LEARNING_STUDIO_STATE_CHANGED_EVENT = 'learning-studio-state-changed';
 
-type QuizStatus = { [key: number]: 'correct' | 'fail' | 'pending' };
+type QuizStatusValue = 'correct' | 'fail' | 'pending';
+type QuizStatus = { [key: number]: QuizStatusValue };
 interface AreaState {
   currentQuestion: number;
   shuffleQuestions: boolean;
@@ -12,6 +13,88 @@ interface AreaState {
   quizStatus: QuizStatus;
   selectedSections: string[];
   selectedQuestions: number[];
+}
+
+const VALID_QUIZ_STATUS_VALUES = new Set<QuizStatusValue>(['correct', 'fail', 'pending']);
+
+function normalizeQuizStatus(input: unknown): QuizStatus | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return undefined;
+  }
+
+  const entries = Object.entries(input).filter(([key, value]) => {
+    const index = Number(key);
+    return (
+      Number.isInteger(index) &&
+      index >= 0 &&
+      VALID_QUIZ_STATUS_VALUES.has(value as QuizStatusValue)
+    );
+  });
+  return Object.fromEntries(entries) as QuizStatus;
+}
+
+function normalizeQuestionIndices(input: unknown): number[] | undefined {
+  if (!Array.isArray(input)) return undefined;
+  return Array.from(
+    new Set(
+      input.filter(
+        (value): value is number =>
+          typeof value === 'number' && Number.isInteger(value) && value >= 0
+      )
+    )
+  );
+}
+
+function normalizeSelectedSections(input: unknown): string[] | undefined {
+  if (!Array.isArray(input)) return undefined;
+  return Array.from(
+    new Set(input.filter((value): value is string => typeof value === 'string' && value.length > 0))
+  );
+}
+
+function normalizeAreaState(input: unknown): Partial<AreaState> | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return undefined;
+  }
+
+  const raw = input as Partial<AreaState>;
+  const normalized: Partial<AreaState> = {};
+  if (typeof raw.shuffleQuestions === 'boolean') {
+    normalized.shuffleQuestions = raw.shuffleQuestions;
+  }
+  if (typeof raw.shuffleAnswers === 'boolean') {
+    normalized.shuffleAnswers = raw.shuffleAnswers;
+  }
+
+  const quizStatus = normalizeQuizStatus(raw.quizStatus);
+  const selectedQuestions = normalizeQuestionIndices(raw.selectedQuestions);
+  const hasProgress =
+    Boolean(quizStatus && Object.keys(quizStatus).length > 0) ||
+    Boolean(selectedQuestions && selectedQuestions.length > 0);
+
+  // Empty containers plus a current-question marker are not resumable
+  // progress. Drop only transient quiz fields and retain area preferences.
+  if (hasProgress) {
+    if (quizStatus && Object.keys(quizStatus).length > 0) {
+      normalized.quizStatus = quizStatus;
+    }
+    if (selectedQuestions && selectedQuestions.length > 0) {
+      normalized.selectedQuestions = selectedQuestions;
+    }
+    const selectedSections = normalizeSelectedSections(raw.selectedSections);
+    if (selectedSections && selectedSections.length > 0) {
+      normalized.selectedSections = selectedSections;
+    }
+    if (
+      typeof raw.currentQuestion === 'number' &&
+      Number.isInteger(raw.currentQuestion) &&
+      raw.currentQuestion >= 0
+    ) {
+      normalized.currentQuestion = raw.currentQuestion;
+    }
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
 interface UserAreaConfig {
@@ -57,18 +140,34 @@ function normalizeAreaConfigByUser(input: unknown): AppState['areaConfigByUser']
   return Object.fromEntries(filtered);
 }
 
-function normalizeAppState(input: unknown): AppState {
+export function sanitizeAppState(input: unknown): AppState {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return { areas: {} };
   }
 
   const obj = input as Partial<AppState>;
-  return {
-    language: typeof obj.language === 'string' ? normalizeLanguage(obj.language) : undefined,
-    currentArea: typeof obj.currentArea === 'string' ? obj.currentArea : undefined,
-    areas: obj.areas && typeof obj.areas === 'object' ? obj.areas : {},
-    areaConfigByUser: normalizeAreaConfigByUser(obj.areaConfigByUser),
+  const rawAreas =
+    obj.areas && typeof obj.areas === 'object' && !Array.isArray(obj.areas) ? obj.areas : {};
+  const normalizedAreas = Object.fromEntries(
+    Object.entries(rawAreas)
+      .map(([areaKey, areaState]) => [areaKey, normalizeAreaState(areaState)] as const)
+      .filter((entry): entry is readonly [string, Partial<AreaState>] => Boolean(entry[1]))
+  );
+  const normalized: AppState = {
+    areas: normalizedAreas,
   };
+
+  if (typeof obj.language === 'string') {
+    normalized.language = normalizeLanguage(obj.language);
+  }
+  if (typeof obj.currentArea === 'string' && obj.currentArea.length > 0) {
+    normalized.currentArea = obj.currentArea;
+  }
+  const areaConfigByUser = normalizeAreaConfigByUser(obj.areaConfigByUser);
+  if (areaConfigByUser) {
+    normalized.areaConfigByUser = areaConfigByUser;
+  }
+  return normalized;
 }
 export interface AppState {
   language?: AppLanguage;
@@ -192,6 +291,32 @@ export const storage = {
     return areaState.selectedQuestions;
   },
 
+  replaceAreaQuizProgress(
+    areaKey: string,
+    progress: Pick<
+      Partial<AreaState>,
+      'currentQuestion' | 'quizStatus' | 'selectedQuestions' | 'selectedSections'
+    >
+  ) {
+    const state = getStoredState();
+    const existingArea = state.areas[areaKey] || {};
+    const preferences = { ...existingArea };
+    delete preferences.currentQuestion;
+    delete preferences.quizStatus;
+    delete preferences.selectedQuestions;
+    delete preferences.selectedSections;
+    setStoredState({
+      ...state,
+      areas: {
+        ...state.areas,
+        [areaKey]: {
+          ...preferences,
+          ...progress,
+        },
+      },
+    });
+  },
+
   setUserAllowedAreas(userKey: string, allowedAreaShortNames: string[]) {
     const state = getStoredState();
     const existingConfigByUser = state.areaConfigByUser || {};
@@ -224,7 +349,13 @@ function getStoredState(): AppState {
   try {
     const savedState = localStorage.getItem(LOCAL_STORAGE_KEY);
     if (savedState) {
-      return normalizeAppState(JSON.parse(savedState));
+      const parsed = JSON.parse(savedState);
+      const normalized = sanitizeAppState(parsed);
+      const normalizedJson = JSON.stringify(normalized);
+      if (normalizedJson !== JSON.stringify(parsed)) {
+        localStorage.setItem(LOCAL_STORAGE_KEY, normalizedJson);
+      }
+      return normalized;
     }
   } catch (e) {
     console.error('Failed to parse state from localStorage', e);
@@ -237,7 +368,7 @@ function setStoredState(state: AppState) {
     return;
   }
   try {
-    const normalizedState = normalizeAppState(state);
+    const normalizedState = sanitizeAppState(state);
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(normalizedState));
     dispatchStateChanged(normalizedState);
   } catch (e) {

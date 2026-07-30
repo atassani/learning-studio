@@ -26,8 +26,6 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useQuizLogic } from './hooks/useQuizLogic';
 import { useLearningStateSync } from './hooks/useLearningStateSync';
 import { LEARNING_STUDIO_STATE_CHANGED_EVENT, storage } from './storage';
-import { getLearningState, getLearningStateForAuthBootstrap } from './learningStateApi';
-import { isRemoteLearningStateReadEnabled } from './persistenceMode';
 import {
   orderAreasByConfiguredShortNames,
   sanitizeConfiguredAreaShortNames,
@@ -37,6 +35,7 @@ import { normalizeAreasPayload, normalizeQuestionsPayload } from './contentPaylo
 import { useI18n } from './i18n/I18nProvider';
 import { AppLanguage, isLanguageSelectionEnabled } from './i18n/config';
 import { normalizeTrueFalseValue } from './trueFalse';
+import { fetchJsonWithCache as fetchCachedJson, JsonCacheStorage } from './fetchJsonWithCache';
 
 interface AreaConfigUser {
   username?: string;
@@ -45,6 +44,25 @@ interface AreaConfigUser {
     sub?: string;
     email?: string;
   };
+}
+
+type SavedQuizStatus = Record<number, 'correct' | 'fail' | 'pending'>;
+
+function hasSavedQuizStatus(status: SavedQuizStatus | undefined): status is SavedQuizStatus {
+  return Boolean(status && Object.keys(status).length > 0);
+}
+
+function hasSavedQuestionSelection(
+  selectedQuestions: number[] | undefined
+): selectedQuestions is number[] {
+  return Boolean(selectedQuestions && selectedQuestions.length > 0);
+}
+
+function hasUsableSavedProgress(
+  status: SavedQuizStatus | undefined,
+  selectedQuestions: number[] | undefined
+): boolean {
+  return hasSavedQuizStatus(status) || hasSavedQuestionSelection(selectedQuestions);
 }
 
 function normalizeUserKey(key: string): string {
@@ -208,10 +226,10 @@ export default function QuizApp() {
   }>({ thumbTop: 0, thumbHeight: 0, show: false });
   const resumeQuestionRef = useRef<number | null>(null);
   const currentLoadingAreaRef = useRef<string | null>(null);
+  const selectedAreaLoadHandledRef = useRef<AreaType | null>(null);
   const areasRequestSeqRef = useRef(0);
   const autoConfigureRedirectRef = useRef(false);
   const manualConfigureNavigationRef = useRef(false);
-  const directBootstrapAttemptedRef = useRef(false);
   const preferredLanguageInitializedRef = useRef(false);
   const routeLanguageOverrideInitializedRef = useRef(false);
   const routeLanguageOverrideRef = useRef<AppLanguage | undefined>(undefined);
@@ -234,7 +252,7 @@ export default function QuizApp() {
     [dataBaseUrl]
   );
 
-  const safeLocalStorage = useMemo(
+  const safeLocalStorage = useMemo<JsonCacheStorage>(
     () => ({
       get(key: string) {
         try {
@@ -246,8 +264,17 @@ export default function QuizApp() {
       },
       set(key: string, value: string) {
         try {
-          if (typeof window === 'undefined') return;
+          if (typeof window === 'undefined') return false;
           window.localStorage.setItem(key, value);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      remove(key: string) {
+        try {
+          if (typeof window === 'undefined') return;
+          window.localStorage.removeItem(key);
         } catch {
           return;
         }
@@ -258,7 +285,6 @@ export default function QuizApp() {
 
   const isGuestUser = Boolean(user?.isGuest);
   const canConfigureAreas = isAuthenticated && !isGuestUser;
-  const remoteLearningStateReadEnabled = isRemoteLearningStateReadEnabled();
   const areaConfigUserKey = useMemo(() => getAreaConfigUserKey(user), [user]);
   const languageScopedAreaConfigUserKey = useMemo(() => {
     if (!areaConfigUserKey) return null;
@@ -266,68 +292,7 @@ export default function QuizApp() {
   }, [areaConfigUserKey, activeLanguage]);
 
   const fetchJsonWithCache = useCallback(
-    async (url: string) => {
-      const etagKey = `data-etag:${url}`;
-      const cacheKey = `data-cache:${url}`;
-      const cachedEtag = safeLocalStorage.get(etagKey);
-      const headers: HeadersInit = {};
-      if (cachedEtag) {
-        headers['If-None-Match'] = cachedEtag;
-      }
-
-      // Retry transient failures (network errors, 5xx) with backoff. Without
-      // this, a single blip on a CDN/origin edge case leaves the loading
-      // spinner stuck forever - nothing else in this chain has a timeout or
-      // fallback, so a failed fetch here was a dead end (bug found 2026-07-29:
-      // an intermittent 503 on studio-data hung the quiz page indefinitely).
-      //
-      // 2026-07-30: 3 attempts (400ms/800ms backoff, ~1.2s total) wasn't
-      // enough - studio-data is a low-traffic S3 bucket, and a real page
-      // load fires ~15+ concurrent requests at once (JS chunks, fonts, CSS,
-      // plus these data files), which can trip S3's "sudden burst" SlowDown
-      // (503) behavior for longer than 1.2s. Widened to 5 attempts with a
-      // longer backoff (~7.5s total) to give that more room to clear.
-      const maxAttempts = 5;
-      let lastError: unknown;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        if (attempt > 0) {
-          await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** (attempt - 1)));
-        }
-        try {
-          const response = await fetch(url, {
-            headers,
-            cache: 'no-cache',
-          });
-
-          if (response.status === 304) {
-            const cached = safeLocalStorage.get(cacheKey);
-            if (cached) {
-              return JSON.parse(cached);
-            }
-          }
-
-          if (!response.ok) {
-            // 4xx won't be fixed by retrying; only retry server/transient errors.
-            if (response.status < 500) {
-              throw new Error(`Error ${response.status}: ${response.statusText}`);
-            }
-            lastError = new Error(`Error ${response.status}: ${response.statusText}`);
-            continue;
-          }
-
-          const data = await response.json();
-          const etag = response.headers?.get?.('ETag');
-          if (etag) {
-            safeLocalStorage.set(etagKey, etag);
-          }
-          safeLocalStorage.set(cacheKey, JSON.stringify(data));
-          return data;
-        } catch (err) {
-          lastError = err;
-        }
-      }
-      throw lastError instanceof Error ? lastError : new Error('Failed to fetch after retries');
-    },
+    (url: string) => fetchCachedJson(url, safeLocalStorage),
     [safeLocalStorage]
   );
 
@@ -528,7 +493,6 @@ export default function QuizApp() {
   }, [
     isLoading,
     canConfigureAreas,
-    remoteLearningStateReadEnabled,
     learningStateBootstrapCompleted,
     syncUserAreaConfigFromStorage,
   ]);
@@ -726,8 +690,8 @@ export default function QuizApp() {
 
       if (areaToRestore) {
         const savedStatus = storage.getAreaQuizStatus(areaToRestore.shortName);
-        const savedCurrent = storage.getAreaCurrentQuestion(areaToRestore.shortName);
-        const hasSavedProgress = Boolean(savedStatus) || savedCurrent !== null;
+        const savedSelectedQuestions = storage.getAreaSelectedQuestions(areaToRestore.shortName);
+        const hasSavedProgress = hasUsableSavedProgress(savedStatus, savedSelectedQuestions);
 
         setSelectedArea(areaToRestore);
         setCurrentQuizType(areaToRestore.type);
@@ -865,68 +829,30 @@ export default function QuizApp() {
   );
 
   const handleServerStateApplied = useCallback(() => {
+    const routeOverrideLanguage = routeLanguageOverrideRef.current;
+    if (routeOverrideLanguage) {
+      storage.setLanguage(routeOverrideLanguage);
+      if (routeOverrideLanguage !== activeLanguage) {
+        setActiveLanguage(routeOverrideLanguage);
+      }
+      routeLanguageOverrideRef.current = undefined;
+    } else {
+      const restoredLanguage = storage.getLanguage();
+      if (restoredLanguage && restoredLanguage !== activeLanguage) {
+        setActiveLanguage(restoredLanguage);
+      }
+    }
     loadAreas();
-  }, [loadAreas]);
-
-  const isTestRuntime = process.env.NODE_ENV === 'test';
+  }, [activeLanguage, loadAreas, setActiveLanguage]);
 
   useLearningStateSync({
-    enabled:
-      !isTestRuntime &&
-      !isLoading &&
-      isAuthenticated &&
-      !user?.isGuest &&
-      remoteLearningStateReadEnabled,
+    enabled: !isLoading && isAuthenticated && !user?.isGuest,
     onServerStateApplied: handleServerStateApplied,
     onBootstrapCompleted: () => {
+      setLearningStateBootstrapCompleted(true);
       syncUserAreaConfigFromStorage();
     },
   });
-
-  useEffect(() => {
-    if (isLoading || !isAuthenticated || user?.isGuest) {
-      directBootstrapAttemptedRef.current = false;
-      return;
-    }
-    if (directBootstrapAttemptedRef.current) {
-      return;
-    }
-    directBootstrapAttemptedRef.current = true;
-
-    getLearningStateForAuthBootstrap('global')
-      .then((remote) => {
-        if (remote?.state) {
-          storage.replaceState(remote.state);
-          const routeOverrideLanguage = routeLanguageOverrideRef.current;
-          if (routeOverrideLanguage) {
-            storage.setLanguage(routeOverrideLanguage);
-            if (routeOverrideLanguage !== activeLanguage) {
-              setActiveLanguage(routeOverrideLanguage);
-            }
-            routeLanguageOverrideRef.current = undefined;
-          } else {
-            const restoredLanguage = storage.getLanguage();
-            if (restoredLanguage && restoredLanguage !== activeLanguage) {
-              setActiveLanguage(restoredLanguage);
-            }
-          }
-        }
-        syncUserAreaConfigFromStorage();
-      })
-      .catch((error) => {
-        console.error('Direct bootstrap from remote learning state failed', error);
-      })
-      .finally(() => {
-        setLearningStateBootstrapCompleted(true);
-      });
-  }, [
-    activeLanguage,
-    isLoading,
-    isAuthenticated,
-    setActiveLanguage,
-    user?.isGuest,
-    syncUserAreaConfigFromStorage,
-  ]);
 
   useEffect(() => {
     if (canConfigureAreas && !learningStateBootstrapCompleted) {
@@ -934,27 +860,6 @@ export default function QuizApp() {
     }
     storage.setLanguage(activeLanguage);
   }, [activeLanguage, canConfigureAreas, learningStateBootstrapCompleted]);
-
-  useEffect(() => {
-    if (isLoading || !isAuthenticated || user?.isGuest) return;
-    if (!learningStateBootstrapCompleted) return;
-
-    const snapshot = storage.getStateSnapshot();
-    const hasLocalState =
-      Boolean(snapshot.currentArea) ||
-      Object.keys(snapshot.areas ?? {}).length > 0 ||
-      Object.keys(snapshot.areaConfigByUser ?? {}).length > 0;
-    if (hasLocalState) return;
-
-    getLearningState('global')
-      .then((remote) => {
-        if (!remote?.state) return;
-        storage.replaceState(remote.state);
-      })
-      .catch((error) => {
-        console.error('Failed to apply fallback learning state bootstrap', error);
-      });
-  }, [isLoading, isAuthenticated, user?.isGuest, learningStateBootstrapCompleted]);
 
   useEffect(() => {
     previousAnswerOrderRef.current = {};
@@ -979,6 +884,7 @@ export default function QuizApp() {
 
   // Shared function to load area questions and restore progress
   const loadAreaAndQuestions = async (area: AreaType, forceMenu = false) => {
+    selectedAreaLoadHandledRef.current = area;
     // Track the current area being loaded to prevent race conditions
     const loadingId = `${area.shortName}_${Date.now()}`;
     currentLoadingAreaRef.current = loadingId;
@@ -1001,7 +907,17 @@ export default function QuizApp() {
     const areaKey = area.shortName;
     const savedStatus = storage.getAreaQuizStatus(areaKey);
     const savedCurrent = storage.getAreaCurrentQuestion(areaKey);
+    const savedSelectedSections = storage.getAreaSelectedSections(areaKey);
     const savedSelectedQuestions = storage.getAreaSelectedQuestions(areaKey);
+    const hasSavedProgress = hasUsableSavedProgress(savedStatus, savedSelectedQuestions);
+    const hasPersistedQuizMarkers =
+      savedStatus !== undefined ||
+      savedSelectedQuestions !== undefined ||
+      savedCurrent !== undefined;
+    const savedCurrentIndex =
+      typeof savedCurrent === 'number' && Number.isInteger(savedCurrent) && savedCurrent >= 0
+        ? savedCurrent
+        : null;
     try {
       const areaUrl = buildDataUrl(area.file);
       const questionsData = await fetchJsonWithCache(areaUrl);
@@ -1022,19 +938,6 @@ export default function QuizApp() {
         }));
         if (currentLoadingAreaRef.current !== loadingId) return;
         setAllQuestions(questionsWithIndex);
-        let parsedStatus: Record<number, 'correct' | 'fail' | 'pending'> = {};
-        if (savedStatus) {
-          parsedStatus = savedStatus;
-        } else {
-          parsedStatus = questionsWithIndex.reduce(
-            (acc: Record<number, 'correct' | 'fail' | 'pending'>, q: QuestionType) => {
-              acc[q.index] = 'pending';
-              return acc;
-            },
-            {}
-          );
-        }
-        setStatus(parsedStatus);
 
         // Load shuffle preference for this area from localStorage
         const savedShuffleQuestions = storage.getAreaShuffleQuestions(areaKey);
@@ -1060,24 +963,48 @@ export default function QuizApp() {
           orderedQuestions = fisherYatesShuffle(orderedQuestions);
         }
 
-        // If we have saved selected questions, filter to only those questions
-        if (savedSelectedQuestions) {
+        // Restore only a non-empty saved subset. Empty containers are not
+        // progress and must not filter a valid payload down to zero questions.
+        if (hasSavedQuestionSelection(savedSelectedQuestions)) {
           const selectedIndices = savedSelectedQuestions;
           orderedQuestions = orderedQuestions.filter((q) => selectedIndices.includes(q.index));
-        } else if (savedStatus) {
+        } else if (hasSavedQuizStatus(savedStatus)) {
           // Legacy session without savedSelectedQuestions - infer from saved status indices
           const statusIndices = Object.keys(savedStatus).map(Number);
           orderedQuestions = orderedQuestions.filter((q) => statusIndices.includes(q.index));
         }
 
-        // If forced via parameter, always show the menu on area change
-        if (forceMenu) {
+        const clearInvalidQuizProgress = () => {
+          storage.replaceAreaQuizProgress(areaKey, {});
+        };
+        const showFreshSelectionMenu = () => {
           setQuestions([]);
           setCurrent(null);
           setShowSelectionMenu(true);
           setSelectionMode(null);
           setShowStatus(false);
           setShowResult(null);
+        };
+
+        if (hasSavedProgress && orderedQuestions.length === 0) {
+          clearInvalidQuizProgress();
+          setStatus({});
+          showFreshSelectionMenu();
+          return;
+        }
+
+        const parsedStatus = orderedQuestions.reduce(
+          (acc: Record<number, 'correct' | 'fail' | 'pending'>, q: QuestionType) => {
+            acc[q.index] = savedStatus?.[q.index] ?? 'pending';
+            return acc;
+          },
+          {}
+        );
+        setStatus(parsedStatus);
+
+        // If forced via parameter, always show the menu on area change
+        if (forceMenu) {
+          showFreshSelectionMenu();
           return;
         }
         // If all questions are answered, show the menu and clean up currentQuestion
@@ -1086,30 +1013,22 @@ export default function QuizApp() {
           Object.values(parsedStatus).every((s) => s !== 'pending');
         if (allAnswered) {
           storage.setAreaCurrentQuestion(areaKey, undefined);
-          setQuestions([]);
-          setCurrent(null);
-          setShowSelectionMenu(true);
-          setSelectionMode(null);
-          setShowStatus(false);
-          setShowResult(null);
+          showFreshSelectionMenu();
           return;
         }
         // If there is no saved progress, show the selection menu
-        if (!savedStatus && !savedCurrent) {
-          setQuestions([]);
-          setCurrent(null);
-          setShowSelectionMenu(true);
-          setSelectionMode(null);
-          setShowStatus(false);
-          setShowResult(null);
+        if (!hasSavedProgress) {
+          if (hasPersistedQuizMarkers) {
+            clearInvalidQuizProgress();
+          }
+          showFreshSelectionMenu();
           return;
         }
         // Otherwise, resume at the last question or first pending
         let idx = 0;
-        if (savedCurrent !== null) {
-          const n = Number(savedCurrent);
-          if (!isNaN(n) && n >= 0 && n < orderedQuestions.length) {
-            idx = n;
+        if (savedCurrentIndex !== null) {
+          if (savedCurrentIndex < orderedQuestions.length) {
+            idx = savedCurrentIndex;
           } else {
             // If savedCurrent is out of range, find first pending
             const nextPending = orderedQuestions.findIndex(
@@ -1129,6 +1048,16 @@ export default function QuizApp() {
           }
         }
 
+        const availableSections = new Set(orderedQuestions.map((question) => question.section));
+        const validSelectedSections = savedSelectedSections?.filter((section) =>
+          availableSections.has(section)
+        );
+        storage.replaceAreaQuizProgress(areaKey, {
+          currentQuestion: idx,
+          quizStatus: parsedStatus,
+          selectedQuestions: orderedQuestions.map((question) => question.index),
+          ...(validSelectedSections?.length ? { selectedSections: validSelectedSections } : {}),
+        });
         setQuestions(orderedQuestions);
         setCurrent(idx);
         setShowSelectionMenu(false);
@@ -1220,7 +1149,11 @@ export default function QuizApp() {
   // Load questions for selected area on every area change
   useEffect(() => {
     if (!selectedArea) return;
-    loadAreaAndQuestions(selectedArea);
+    if (selectedAreaLoadHandledRef.current === selectedArea) {
+      selectedAreaLoadHandledRef.current = null;
+      return;
+    }
+    void loadAreaAndQuestions(selectedArea);
   }, [selectedArea]);
 
   // Keep a visible scroll indicator for the question selection view

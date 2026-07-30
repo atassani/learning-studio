@@ -34,9 +34,10 @@ describe('localStorage abstraction', () => {
     expect(currentArea).toBe('Area 51');
   });
 
-  it('write area currentQuestion using storage module is read directly from localStorage', () => {
+  it('writes area currentQuestion when resumable progress exists', () => {
     const theArea = 'the-area';
     const theCurrentQuestion = 3;
+    storage.setAreaQuizStatus(theArea, { 3: 'pending' });
     storage.setAreaCurrentQuestion(theArea, theCurrentQuestion);
     const storedState = localStorage.getItem('learningStudio');
     const areasFromState = JSON.parse(storedState || '{}').areas;
@@ -44,10 +45,10 @@ describe('localStorage abstraction', () => {
     expect(theAreaFromState.currentQuestion).toBe(theCurrentQuestion);
   });
 
-  it('write area currentQuestion directly to localStorage is read by storage module', () => {
+  it('reads area currentQuestion from localStorage when resumable progress exists', () => {
     const stateToStore = {
       currentArea: 'the-area',
-      areas: { ['the-area']: { currentQuestion: 3 } },
+      areas: { ['the-area']: { currentQuestion: 3, quizStatus: { 3: 'pending' } } },
     };
     localStorage.setItem('learningStudio', JSON.stringify(stateToStore));
     const currentQuestion = storage.getAreaCurrentQuestion('the-area');
@@ -103,5 +104,52 @@ describe('localStorage abstraction', () => {
   it('deduplicates repeated user allowed areas before storing', () => {
     storage.setUserAllowedAreas('user-123', ['ipc', 'ipc', 'fdl']);
     expect(storage.getUserAllowedAreas('user-123')).toEqual(['ipc', 'fdl']);
+  });
+
+  it('sanitizes invalid area progress at ingestion while preserving preferences and other areas', () => {
+    localStorage.setItem(
+      'learningStudio',
+      JSON.stringify({
+        language: 'en',
+        currentArea: 'log1',
+        areas: {
+          log1: {
+            currentQuestion: 0,
+            quizStatus: {},
+            selectedQuestions: [],
+            selectedSections: [],
+            shuffleQuestions: false,
+            shuffleAnswers: true,
+          },
+          log2: {
+            currentQuestion: 1,
+            quizStatus: { 0: 'correct', 1: 'pending' },
+            selectedQuestions: [0, 1],
+            shuffleQuestions: true,
+          },
+        },
+      })
+    );
+
+    expect(storage.getStateSnapshot()).toEqual({
+      language: 'en',
+      currentArea: 'log1',
+      areas: {
+        log1: {
+          shuffleQuestions: false,
+          shuffleAnswers: true,
+        },
+        log2: {
+          currentQuestion: 1,
+          quizStatus: { 0: 'correct', 1: 'pending' },
+          selectedQuestions: [0, 1],
+          shuffleQuestions: true,
+        },
+      },
+    });
+    expect(JSON.parse(localStorage.getItem('learningStudio') || '{}').areas.log1).toEqual({
+      shuffleQuestions: false,
+      shuffleAnswers: true,
+    });
   });
 });

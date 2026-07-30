@@ -1,8 +1,13 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import { AppState, LEARNING_STUDIO_STATE_CHANGED_EVENT, storage } from '../storage';
-import { getLearningState, putLearningState } from '../learningStateApi';
+import {
+  AppState,
+  LEARNING_STUDIO_STATE_CHANGED_EVENT,
+  sanitizeAppState,
+  storage,
+} from '../storage';
+import { getLearningStateForAuthBootstrap, putLearningState } from '../learningStateApi';
 
 interface UseLearningStateSyncOptions {
   enabled: boolean;
@@ -16,7 +21,9 @@ export function useLearningStateSync({
   onBootstrapCompleted,
 }: UseLearningStateSyncOptions) {
   const initializedRef = useRef(false);
-  const bootstrappedRef = useRef(false);
+  const bootstrapRequestRef = useRef<ReturnType<typeof getLearningStateForAuthBootstrap> | null>(
+    null
+  );
   const suppressNextSyncRef = useRef(false);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onServerStateAppliedRef = useRef(onServerStateApplied);
@@ -35,39 +42,43 @@ export function useLearningStateSync({
 
     if (!enabled) {
       initializedRef.current = false;
-      bootstrappedRef.current = false;
+      bootstrapRequestRef.current = null;
       return () => {
         cancelled = true;
       };
     }
-
-    if (bootstrappedRef.current) {
-      return () => {
-        cancelled = true;
-      };
-    }
-    bootstrappedRef.current = true;
 
     const bootstrap = async () => {
       try {
         const localState = storage.getStateSnapshot();
-        const remote = await getLearningState('global');
+        if (!bootstrapRequestRef.current) {
+          bootstrapRequestRef.current = getLearningStateForAuthBootstrap('global');
+        }
+        const remote = await bootstrapRequestRef.current;
         if (cancelled) {
           return;
         }
 
         if (remote?.state) {
+          const sanitizedRemoteState = sanitizeAppState(remote.state);
+          const remoteStateChanged =
+            JSON.stringify(sanitizedRemoteState) !== JSON.stringify(remote.state);
           suppressNextSyncRef.current = true;
-          storage.replaceState(remote.state);
+          storage.replaceState(sanitizedRemoteState);
           onServerStateAppliedRef.current?.();
+          if (remoteStateChanged) {
+            await putLearningState(sanitizedRemoteState, 'global', new Date().toISOString());
+          }
         } else if (hasLocalProgress(localState)) {
           await putLearningState(localState, 'global', new Date().toISOString());
         }
       } catch (error) {
         console.error('Failed to bootstrap learning state sync', error);
       } finally {
-        initializedRef.current = true;
-        onBootstrapCompletedRef.current?.();
+        if (!cancelled) {
+          initializedRef.current = true;
+          onBootstrapCompletedRef.current?.();
+        }
       }
     };
 
